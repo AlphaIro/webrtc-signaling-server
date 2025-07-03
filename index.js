@@ -37,20 +37,23 @@ wss.on("connection", (ws) => {
     if (!sessions[session]) sessions[session] = {};
     sessions[session][from] = ws;
 
-    // If offer, store it temporarily
+    // If offer, store it temporarily (60 seconds validity)
     if (type === "offer") {
       storedOffers[session] = {
         offer: msg,
         timestamp: Date.now()
       };
+      console.log("💾 Stored SDP offer for replay");
     }
 
-    // If receiver joins later, send stored offer
+    // If receiver joins late, replay the offer
     if (type === "join" && from === "receiver") {
       const stored = storedOffers[session];
-      if (stored && Date.now() - stored.timestamp < 60000) {  // valid for 60 seconds
+      if (stored && Date.now() - stored.timestamp < 60000) {
         console.log("📤 Sending stored offer to late-joining receiver");
         ws.send(JSON.stringify(stored.offer));
+      } else {
+        console.log("⏳ No valid stored offer found");
       }
     }
 
