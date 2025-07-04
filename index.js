@@ -12,6 +12,7 @@ app.get("/", (req, res) => {
 
 const sessions = {};        // { sessionId: { clientName: ws } }
 const storedOffers = {};    // { sessionId: { offer: offerMessage, timestamp } }
+const lastSeen = {};        // { sessionId: { manager: ts, receiver: ts } }
 
 function logClients() {
   console.log(`📊 Connected clients: ${[...wss.clients].length}`);
@@ -33,11 +34,12 @@ wss.on("connection", (ws) => {
     const { type, session, from, to } = msg;
     console.log(`📨 Message received: ${type}`, msg);
 
-    // Track clients by session and name
     if (!sessions[session]) sessions[session] = {};
     sessions[session][from] = ws;
 
-    // If offer, store it temporarily (60 seconds validity)
+    if (!lastSeen[session]) lastSeen[session] = {};
+    lastSeen[session][from] = Date.now();
+
     if (type === "offer") {
       storedOffers[session] = {
         offer: msg,
@@ -46,10 +48,9 @@ wss.on("connection", (ws) => {
       console.log("💾 Stored SDP offer for replay");
     }
 
-    // If receiver joins late, replay the offer
     if (type === "join" && from === "receiver") {
       const stored = storedOffers[session];
-      if (stored && Date.now() - stored.timestamp < 60000) {
+      if (stored && Date.now() - stored.timestamp < 2 * 24 * 60 * 60 * 1000) {
         console.log("📤 Sending stored offer to late-joining receiver");
         ws.send(JSON.stringify(stored.offer));
       } else {
@@ -57,7 +58,6 @@ wss.on("connection", (ws) => {
       }
     }
 
-    // Forward message to intended recipient
     if (to && sessions[session] && sessions[session][to]) {
       const target = sessions[session][to];
       if (target.readyState === WebSocket.OPEN) {
@@ -75,6 +75,24 @@ wss.on("connection", (ws) => {
     console.error("💥 WebSocket error:", err.message);
   });
 });
+
+// 🧹 Periodic cleanup of old sessions (every 1 hour)
+setInterval(() => {
+  const now = Date.now();
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
+
+  Object.entries(lastSeen).forEach(([sessionId, clients]) => {
+    const managerSeen = clients.manager || 0;
+    const receiverSeen = clients.receiver || 0;
+
+    if (now - managerSeen > TWO_DAYS && now - receiverSeen > TWO_DAYS) {
+      console.log(`🗑️ Expiring inactive session: ${sessionId}`);
+      delete sessions[sessionId];
+      delete storedOffers[sessionId];
+      delete lastSeen[sessionId];
+    }
+  });
+}, 3600000); // every 1 hour
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
