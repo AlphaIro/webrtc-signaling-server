@@ -2,70 +2,120 @@ const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
 
-const SECRET_KEY = "815815815avich";
-
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const sessions = {}; // { sessionId: { receiver: ws, managers: { clientId: ws } } }
-const storedOffers = {}, storedIce = {}, lastSeen = {};
+app.get("/", (req, res) => {
+  res.send("<h2 style='color:green;'>✅ WebRTC Signaling Server is running.</h2>");
+});
 
-wss.on("connection", ws => {
-  ws.on("message", msgStr => {
+const sessions = {};        // { sessionId: { clientName: ws } }
+const storedOffers = {};    // { sessionId: { offer: offerMessage, timestamp } }
+const storedIce = {};       // { sessionId: [ice1, ice2, ...] }
+const lastSeen = {};        // { sessionId: { manager: ts, receiver: ts } }
+
+function logClients() {
+  console.log(`📊 Connected clients: ${[...wss.clients].length}`);
+}
+
+wss.on("connection", (ws) => {
+  console.log("🔌 New WebSocket connection");
+  logClients();
+
+  ws.on("message", (msgStr) => {
     let msg;
     try {
       msg = JSON.parse(msgStr);
-    } catch { return; }
-
-    if (!msg.secret || msg.secret !== SECRET_KEY) {
-      ws.close();
+    } catch (e) {
+      console.log("📨 Non-JSON message received:", msgStr.toString());
       return;
     }
 
     const { type, session, from, to } = msg;
-    if (!sessions[session]) sessions[session] = { receiver: null, managers: {} };
-    if (!lastSeen[session]) lastSeen[session] = {};
+    console.log(`📨 Message received: ${type}`, msg);
 
-    sessions[session][ from === "receiver" ? "receiver" : "managers" ][ from ] = ws;
+    // Track connection
+    if (!sessions[session]) sessions[session] = {};
+    sessions[session][from] = ws;
+
+    if (!lastSeen[session]) lastSeen[session] = {};
     lastSeen[session][from] = Date.now();
 
-    if (type === "offer") storedOffers[session] = { offer: msg, timestamp: Date.now() };
+    // Store offer
+    if (type === "offer") {
+      storedOffers[session] = {
+        offer: msg,
+        timestamp: Date.now()
+      };
+      console.log("💾 Stored SDP offer for replay");
+    }
+
+    // Store ICE
     if (type === "ice") {
-      storedIce[session] = storedIce[session] || [];
+      if (!storedIce[session]) storedIce[session] = [];
       storedIce[session].push(msg);
     }
 
+    // Replay offer and ICE when a client joins
     if (type === "join") {
       const stored = storedOffers[session];
-      if (stored && Date.now() - stored.timestamp < 2*24*3600*1000) {
+      if (stored && Date.now() - stored.timestamp < 2 * 24 * 60 * 60 * 1000) {
+        console.log(`📤 Sending stored offer to ${from}`);
         ws.send(JSON.stringify(stored.offer));
+      } else {
+        console.log("⏳ No valid stored offer found");
       }
-      (storedIce[session] || []).forEach(iceMsg => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(iceMsg));
-      });
+
+      if (storedIce[session]) {
+        console.log(`📤 Replaying stored ICE candidates to ${from}`);
+        storedIce[session].forEach(iceMsg => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(iceMsg));
+          }
+        });
+      }
     }
 
-    // Relay
-    if (to) {
-      const dest = (to === "receiver") ? sessions[session].receiver : sessions[session].managers[to];
-      if (dest && dest.readyState === WebSocket.OPEN) dest.send(msgStr);
+    // Relay messages if possible
+    if (to && sessions[session] && sessions[session][to]) {
+      const target = sessions[session][to];
+      if (target.readyState === WebSocket.OPEN) {
+        target.send(JSON.stringify(msg));
+      }
     }
   });
 
-  ws.on("close", () => {});
+  ws.on("close", () => {
+    console.log("❌ WebSocket disconnected");
+    logClients();
+  });
+
+  ws.on("error", (err) => {
+    console.error("💥 WebSocket error:", err.message);
+  });
 });
 
+// 🧹 Periodic cleanup of old sessions (every 1 hour)
 setInterval(() => {
-  const now = Date.now(), TTL = 2*24*3600*1000;
-  for (const s in lastSeen) {
-    const l = lastSeen[s];
-    if ((l.manager||0) < now-TTL && (l.receiver||0) < now-TTL) {
-      delete sessions[s]; delete storedOffers[s]; delete storedIce[s]; delete lastSeen[s];
-    }
-  }
-}, 3600000);
+  const now = Date.now();
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log(`Server up`);
+  Object.entries(lastSeen).forEach(([sessionId, clients]) => {
+    const managerSeen = clients.manager || 0;
+    const receiverSeen = clients.receiver || 0;
+
+    if (now - managerSeen > TWO_DAYS && now - receiverSeen > TWO_DAYS) {
+      console.log(`🗑️ Expiring inactive session: ${sessionId}`);
+      delete sessions[sessionId];
+      delete storedOffers[sessionId];
+      delete storedIce[sessionId];
+      delete lastSeen[sessionId];
+    }
+  });
+}, 3600000); // every 1 hour
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`✅ WebRTC Signaling Server is running on port ${PORT}`);
 });
