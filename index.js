@@ -12,6 +12,7 @@ app.get("/", (req, res) => {
 
 const sessions = {};        // { sessionId: { clientName: ws } }
 const storedOffers = {};    // { sessionId: { offer: offerMessage, timestamp } }
+const storedIce = {};       // { sessionId: [ice1, ice2, ...] }
 const lastSeen = {};        // { sessionId: { manager: ts, receiver: ts } }
 
 function logClients() {
@@ -34,12 +35,14 @@ wss.on("connection", (ws) => {
     const { type, session, from, to } = msg;
     console.log(`📨 Message received: ${type}`, msg);
 
+    // Track connection
     if (!sessions[session]) sessions[session] = {};
     sessions[session][from] = ws;
 
     if (!lastSeen[session]) lastSeen[session] = {};
     lastSeen[session][from] = Date.now();
 
+    // Store offer
     if (type === "offer") {
       storedOffers[session] = {
         offer: msg,
@@ -48,16 +51,33 @@ wss.on("connection", (ws) => {
       console.log("💾 Stored SDP offer for replay");
     }
 
-    if (type === "join" && from === "receiver") {
+    // Store ICE
+    if (type === "ice") {
+      if (!storedIce[session]) storedIce[session] = [];
+      storedIce[session].push(msg);
+    }
+
+    // Replay offer and ICE when a client joins
+    if (type === "join") {
       const stored = storedOffers[session];
       if (stored && Date.now() - stored.timestamp < 2 * 24 * 60 * 60 * 1000) {
-        console.log("📤 Sending stored offer to late-joining receiver");
+        console.log(`📤 Sending stored offer to ${from}`);
         ws.send(JSON.stringify(stored.offer));
       } else {
         console.log("⏳ No valid stored offer found");
       }
+
+      if (storedIce[session]) {
+        console.log(`📤 Replaying stored ICE candidates to ${from}`);
+        storedIce[session].forEach(iceMsg => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(iceMsg));
+          }
+        });
+      }
     }
 
+    // Relay messages if possible
     if (to && sessions[session] && sessions[session][to]) {
       const target = sessions[session][to];
       if (target.readyState === WebSocket.OPEN) {
@@ -89,6 +109,7 @@ setInterval(() => {
       console.log(`🗑️ Expiring inactive session: ${sessionId}`);
       delete sessions[sessionId];
       delete storedOffers[sessionId];
+      delete storedIce[sessionId];
       delete lastSeen[sessionId];
     }
   });
