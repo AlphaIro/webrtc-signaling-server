@@ -1,22 +1,58 @@
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
+const crypto = require("crypto");
+
+const SECRET_KEY = "815815815avich";
+const TOKEN_EXPIRY_LEEWAY = 60; // seconds
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.get("/", (req, res) => {
-  res.send("<h2 style='color:green;'>✅ WebRTC Signaling Server is running.</h2>");
+  res.send("<h2 style='color:green;'>✅ WebRTC Signaling Server is running with JWT & multi-manager support.</h2>");
 });
 
-const sessions = {};        // { sessionId: { clientName: ws } }
-const storedOffers = {};    // { sessionId: { offer: offerMessage, timestamp } }
-const storedIce = {};       // { sessionId: [ice1, ice2, ...] }
-const lastSeen = {};        // { sessionId: { manager: ts, receiver: ts } }
+const sessions = {};        // { sessionId: { clientId: ws } }
+const storedOffers = {};    // { sessionId: { [from]: { offer, timestamp } } }
+const storedIce = {};       // { sessionId: { [from]: [ice1, ice2, ...] } }
+const lastSeen = {};        // { sessionId: { clientId: timestamp } }
 
 function logClients() {
   console.log(`📊 Connected clients: ${[...wss.clients].length}`);
+}
+
+function verifyJwt(token) {
+  if (!token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+
+  const [headerB64, payloadB64, signature] = parts;
+  const data = `${headerB64}.${payloadB64}`;
+
+  const expectedSig = crypto
+    .createHmac("sha256", SECRET_KEY)
+    .update(data)
+    .digest("base64url");
+
+  if (signature !== expectedSig) return false;
+
+  try {
+    const payloadJson = Buffer.from(payloadB64, "base64url").toString("utf8");
+    const payload = JSON.parse(payloadJson);
+
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && payload.exp < now - TOKEN_EXPIRY_LEEWAY) {
+      console.log("⏰ Token expired");
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.log("❌ Token parsing failed", err.message);
+    return false;
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -32,7 +68,15 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    const { type, session, from, to } = msg;
+    const { type, session, from, to, token } = msg;
+
+    // Validate JWT
+    if (!verifyJwt(token)) {
+      console.log("❌ Invalid or missing token from", from);
+      ws.close(4001, "Unauthorized");
+      return;
+    }
+
     console.log(`📨 Message received: ${type}`, msg);
 
     // Track connection
@@ -42,42 +86,53 @@ wss.on("connection", (ws) => {
     if (!lastSeen[session]) lastSeen[session] = {};
     lastSeen[session][from] = Date.now();
 
-    // Store offer
+    // Store offer per manager
     if (type === "offer") {
-      storedOffers[session] = {
+      if (!storedOffers[session]) storedOffers[session] = {};
+      storedOffers[session][from] = {
         offer: msg,
         timestamp: Date.now()
       };
-      console.log("💾 Stored SDP offer for replay");
+      console.log(`💾 Stored offer for ${from} in session ${session}`);
     }
 
-    // Store ICE
+    // Store ICE per manager
     if (type === "ice") {
-      if (!storedIce[session]) storedIce[session] = [];
-      storedIce[session].push(msg);
+      if (!storedIce[session]) storedIce[session] = {};
+      if (!storedIce[session][from]) storedIce[session][from] = [];
+      storedIce[session][from].push(msg);
     }
 
-    // Replay offer and ICE when a client joins
+    // Handle 'join'
     if (type === "join") {
-      const stored = storedOffers[session];
-      if (stored && Date.now() - stored.timestamp < 2 * 24 * 60 * 60 * 1000) {
-        console.log(`📤 Sending stored offer to ${from}`);
-        ws.send(JSON.stringify(stored.offer));
+      const offers = storedOffers[session];
+      const ices = storedIce[session];
+
+      if (offers) {
+        for (const managerId in offers) {
+          const stored = offers[managerId];
+          if (Date.now() - stored.timestamp < 2 * 24 * 60 * 60 * 1000) {
+            console.log(`📤 Sending offer from ${managerId} to ${from}`);
+            ws.send(JSON.stringify(stored.offer));
+          }
+        }
       } else {
-        console.log("⏳ No valid stored offer found");
+        console.log("⏳ No stored offers found");
       }
 
-      if (storedIce[session]) {
-        console.log(`📤 Replaying stored ICE candidates to ${from}`);
-        storedIce[session].forEach(iceMsg => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(iceMsg));
-          }
-        });
+      if (ices) {
+        for (const managerId in ices) {
+          ices[managerId].forEach(iceMsg => {
+            if (ws.readyState === WebSocket.OPEN) {
+              console.log(`📤 Replaying ICE from ${managerId} to ${from}`);
+              ws.send(JSON.stringify(iceMsg));
+            }
+          });
+        }
       }
     }
 
-    // Relay messages if possible
+    // Relay messages
     if (to && sessions[session] && sessions[session][to]) {
       const target = sessions[session][to];
       if (target.readyState === WebSocket.OPEN) {
@@ -102,10 +157,8 @@ setInterval(() => {
   const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
 
   Object.entries(lastSeen).forEach(([sessionId, clients]) => {
-    const managerSeen = clients.manager || 0;
-    const receiverSeen = clients.receiver || 0;
-
-    if (now - managerSeen > TWO_DAYS && now - receiverSeen > TWO_DAYS) {
+    const allInactive = Object.values(clients).every(ts => now - ts > TWO_DAYS);
+    if (allInactive) {
       console.log(`🗑️ Expiring inactive session: ${sessionId}`);
       delete sessions[sessionId];
       delete storedOffers[sessionId];
