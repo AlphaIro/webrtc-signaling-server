@@ -54,7 +54,6 @@ wss.on("connection", (ws) => {
           sessions[session][from] = ws;
           console.log(`📥 ${from} joined session ${session}`);
 
-          // Send stored offer + ICE to receiver if available
           if (from === "receiver") {
             if (storedOffers[session]) {
               for (const [managerId, offerObj] of Object.entries(storedOffers[session])) {
@@ -117,6 +116,14 @@ wss.on("connection", (ws) => {
 
         case "switch_camera": {
           console.log(`🔄 Camera switch requested by receiver to ${to}`);
+          sendToClient(session, to, msg);
+          break;
+        }
+
+        // ✅ NEW: Add support for 'start_stream' and 'end_stream'
+        case "start_stream":
+        case "end_stream": {
+          console.log(`🎬 ${type} command from ${from} to ${to}`);
           sendToClient(session, to, msg);
           break;
         }
