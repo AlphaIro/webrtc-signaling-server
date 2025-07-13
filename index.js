@@ -52,6 +52,7 @@ wss.on("connection", (ws) => {
           sessionId = session;
           clientId = from;
           sessions[session][from] = ws;
+
           console.log(`📥 ${from} joined session ${session}`);
 
           if (from === "receiver") {
@@ -120,7 +121,6 @@ wss.on("connection", (ws) => {
           break;
         }
 
-        // ✅ NEW: Add support for 'start_stream' and 'end_stream'
         case "start_stream":
         case "end_stream": {
           console.log(`🎬 ${type} command from ${from} to ${to}`);
@@ -147,9 +147,10 @@ wss.on("connection", (ws) => {
 function sendToClient(session, clientId, msg) {
   const ws = sessions[session]?.[clientId];
   if (ws && ws.readyState === WebSocket.OPEN) {
+    console.log(`📨 Sending ${msg.type} to ${clientId}`);
     ws.send(JSON.stringify(msg));
   } else {
-    console.warn(`⚠️ Cannot send to ${clientId}, not connected.`);
+    console.warn(`⚠️ Cannot send ${msg.type} to ${clientId}, not connected.`);
   }
 }
 
