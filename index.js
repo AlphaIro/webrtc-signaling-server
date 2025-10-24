@@ -13,7 +13,7 @@ const jwt = require("jsonwebtoken");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET =
-  process.env.JWT_SECRET || "your-super-secret-and-long-jwt-secret-key-from-env-vars";
+  process.env.JWT_SECRET || "b5fd2e2a7912edfe0d6e5c51b7103ddb";
 
 app.use(bodyParser.json());
 
