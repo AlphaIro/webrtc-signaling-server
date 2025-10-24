@@ -1,118 +1,53 @@
-/*
-  Jarvis Auth & Messaging Server
-  --------------------------------
-  ✅ Works with your current Flutter `MessageService` code.
-  ✅ Supports token-based authentication.
-  ✅ Has /register and /devices/:id/message endpoints
-*/
-
-const express = require("express");
-const bodyParser = require("body-parser");
-const jwt = require("jsonwebtoken");
+import express from "express";
+import crypto from "crypto";
+import cors from "cors";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET =
-  process.env.JWT_SECRET || "b5fd2e2a7912edfe0d6e5c51b7103ddb";
+app.use(express.json());
+app.use(cors());
 
-app.use(bodyParser.json());
+// Store devices in memory (you can replace with a DB later)
+const devices = new Map();
 
-// --- In-memory data store ---
-let devices = [];
-let deviceIdCounter = 1;
-
-// --- Middleware for logging requests ---
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  next();
-});
-
-// --- Middleware for verifying JWT ---
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1]; // Bearer <TOKEN>
-
-  if (!token) {
-    console.warn("Authentication failed: Token missing");
-    return res.status(401).json({ message: "Authentication token is missing." });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      console.warn("Authentication failed: Invalid token", err.message);
-      return res.status(403).json({ message: "Token is invalid or expired." });
-    }
-    req.user = user;
-    next();
-  });
-};
-
-// --- [POST] /register ---
-// Register a new device and return a token.
+// Register a new device and issue a permanent token
 app.post("/register", (req, res) => {
   const { deviceName, isParent } = req.body;
 
   if (!deviceName) {
-    return res.status(400).json({ message: "deviceName is required." });
+    return res.status(400).json({ error: "deviceName is required" });
   }
 
-  const newDevice = {
-    id: `JRV-NODE-${(deviceIdCounter++).toString().padStart(4, "0")}`,
-    name: deviceName,
-    isParent: isParent || false,
-    status: "Online",
-    lastSeen: new Date().toISOString(),
-  };
+  const token = crypto.randomBytes(32).toString("hex");
+  const deviceId = `JRV-NODE-${Math.floor(Math.random() * 9999)}`;
+  const newDevice = { deviceId, deviceName, token, isParent: !!isParent };
 
-  devices.push(newDevice);
-  console.log("Device Registered:", newDevice);
+  devices.set(token, newDevice);
 
-  const token = jwt.sign(
-    { id: newDevice.id, name: newDevice.name },
-    JWT_SECRET,
-    { expiresIn: "30d" }
-  );
-
-  res.status(201).json({ token, deviceId: newDevice.id });
+  console.log(`[SERVER] Registered: ${deviceName} (${deviceId})`);
+  res.json({ deviceId, token });
 });
 
-// --- [POST] /devices/:deviceId/message ---
-// NEW ENDPOINT: Works with your Flutter app
-app.post("/devices/:deviceId/message", authenticateToken, (req, res) => {
-  const { deviceId } = req.params;
-  const { message } = req.body;
-
-  const device = devices.find((d) => d.id === deviceId);
-
-  if (!device) {
-    console.warn(`Device ${deviceId} not found.`);
-    return res.status(404).json({ message: "Device not found." });
+// Verify and accept messages
+app.post("/devices/:deviceId/message", (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Device ")) {
+    return res.status(401).json({ error: "Missing or invalid token format" });
   }
 
-  if (!message) {
-    return res.status(400).json({ message: "Message is required." });
+  const token = authHeader.split(" ")[1];
+  const device = devices.get(token);
+
+  if (!device || device.deviceId !== req.params.deviceId) {
+    return res.status(403).json({ error: "Invalid device token" });
   }
 
-  console.log(`📩 Message received for ${deviceId}: "${message}"`);
-
-  // Simulate handling message (store, log, trigger event, etc.)
-  device.lastSeen = new Date().toISOString();
-
-  return res.status(200).json({
-    success: true,
-    deviceId,
-    receivedMessage: message,
-    timestamp: device.lastSeen,
-  });
+  console.log(`[MESSAGE] From ${device.deviceName}: ${req.body.message}`);
+  res.json({ success: true });
 });
 
-// --- [GET] /devices --- (optional: see registered devices)
-app.get("/devices", authenticateToken, (req, res) => {
-  res.json(devices);
-});
+// Health check
+app.get("/", (_, res) => res.send("Jarvis Auth Server is running"));
 
-// --- Start Server ---
-app.listen(PORT, () => {
-  console.log(`✅ Jarvis Messaging Server running on port ${PORT}`);
-  console.log("⚙️  Ready to receive messages from Flutter app!");
-});
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
