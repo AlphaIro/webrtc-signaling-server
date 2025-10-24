@@ -3,7 +3,7 @@
   --------------------------------
   ✅ Works with your current Flutter `MessageService` code.
   ✅ Supports token-based authentication.
-  ✅ Has /register and /devices/:id/message endpoints.
+  ✅ Has /register and /devices/:id/message endpoints
 */
 
 const express = require("express");
