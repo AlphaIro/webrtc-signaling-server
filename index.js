@@ -1,5 +1,4 @@
 import express from "express";
-import crypto from "crypto";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
@@ -30,7 +29,7 @@ if (fs.existsSync(DATA_FILE)) {
   try {
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
     for (const device of data) {
-      devices.set(device.token, device);
+      devices.set(device.deviceId, device);
     }
     console.log(`[SERVER] Loaded ${devices.size} devices from file.`);
   } catch (err) {
@@ -41,7 +40,10 @@ if (fs.existsSync(DATA_FILE)) {
 // --- Save devices to file ---
 const saveDevices = () => {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(Array.from(devices.values()), null, 2));
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify(Array.from(devices.values()), null, 2)
+    );
   } catch (err) {
     console.error("[SERVER] Failed to save devices:", err);
   }
@@ -51,41 +53,41 @@ const saveDevices = () => {
 app.post("/register", (req, res) => {
   const { deviceName, isParent, appKey } = req.body;
 
-  if (!deviceName) return res.status(400).json({ error: "deviceName is required" });
-  if (!appKey || !APP_KEYS.includes(appKey)) {
+  if (!deviceName)
+    return res.status(400).json({ error: "deviceName is required" });
+  if (!appKey || !APP_KEYS.includes(appKey))
     return res.status(403).json({ error: "Invalid app key" });
-  }
 
-  // Generate permanent token
-  const token = crypto.randomBytes(32).toString("hex");
-  const deviceId = `JRV-NODE-${Math.floor(Math.random() * 9999).toString().padStart(4, "0")}`;
-  const newDevice = { deviceId, deviceName, token, isParent: !!isParent, appKey, lastSeen: new Date().toISOString() };
+  const deviceId = `JRV-NODE-${Math.floor(Math.random() * 9999)
+    .toString()
+    .padStart(4, "0")}`;
 
-  devices.set(token, newDevice);
+  const newDevice = {
+    deviceId,
+    deviceName,
+    isParent: !!isParent,
+    appKey,
+    lastSeen: new Date().toISOString(),
+  };
+
+  devices.set(deviceId, newDevice);
   saveDevices();
 
   console.log(`[SERVER] Registered: ${deviceName} (${deviceId}) using appKey: ${appKey}`);
-  res.json({ deviceId, token });
+  res.json({ deviceId });
 });
 
-// --- Middleware: Verify token + app key ---
-const verifyDevice = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const appKeyHeader = req.headers['x-app-key'];
+// --- Middleware: Verify app key ---
+const verifyAppKey = (req, res, next) => {
+  const appKeyHeader = req.headers["x-app-key"];
+  const device = devices.get(req.params.deviceId);
 
-  if (!authHeader || !authHeader.startsWith("Device ")) {
-    return res.status(401).json({ error: "Missing or invalid token format" });
-  }
-
-  const token = authHeader.split(" ")[1];
-  const device = devices.get(token);
-
-  if (!device || device.deviceId !== req.params.deviceId) {
-    return res.status(403).json({ error: "Invalid device token" });
+  if (!device) {
+    return res.status(404).json({ error: "Device not found" });
   }
 
   if (!appKeyHeader || device.appKey !== appKeyHeader) {
-    return res.status(403).json({ error: "App key does not match" });
+    return res.status(403).json({ error: "Invalid app key" });
   }
 
   req.device = device;
@@ -93,7 +95,7 @@ const verifyDevice = (req, res, next) => {
 };
 
 // --- Receive messages ---
-app.post("/devices/:deviceId/message", verifyDevice, (req, res) => {
+app.post("/devices/:deviceId/message", verifyAppKey, (req, res) => {
   const device = req.device;
   const { message } = req.body;
 
